@@ -1,13 +1,8 @@
 #!bin/sh
 
-export MODEL_NAME="./sd-finetuned-model"
-export TRAIN_DATA_DIR="./dataset/img"
-
-# HACK: Passing any arguments to this script resumes training from the existing model.
-if (( $# != 1))
-then
-	export MODEL_NAME="CompVis/stable-diffusion-v1-4"
-fi
+export TRAIN_DATA_DIR="./dataset"
+export MODEL_NAME="CompVis/stable-diffusion-v1-4"
+# export MODEL_NAME="./sd-finetuned-model"
 
 accelerate launch train_text_to_image.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
