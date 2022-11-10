@@ -1,5 +1,6 @@
 import argparse
 import time
+import os
 
 from diffusers import StableDiffusionPipeline
 
