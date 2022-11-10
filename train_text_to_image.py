@@ -342,16 +342,11 @@ def main():
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
-    # text_encoder.requires_grad_(False)
+    text_encoder.requires_grad_(False)
 
     if args.gradient_checkpointing:
-        text_encoder.enable_gradient_checkpointing()
         unet.enable_gradient_checkpointing()
-    
-    # Bundle up to grab params.
-    model_components = [text_encoder, unet]
-    model_components = torch.nn.ModuleList(model_components)
-    
+
     if args.scale_lr:
         args.learning_rate = (
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
@@ -371,7 +366,7 @@ def main():
         optimizer_cls = torch.optim.AdamW
 
     optimizer = optimizer_cls(
-        model_components.parameters(),
+        unet.parameters(),
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -394,10 +389,11 @@ def main():
     else:
         data_files = {}
         if args.train_data_dir is not None:
-            data_files["train"] = os.path.join(args.train_data_dir, "**")
+            data_files["train"] = os.path.join(args.train_data_dir, "*.*")
         dataset = load_dataset(
             "imagefolder",
-            data_files=data_files,
+            data_dir=args.train_data_dir,
+            split="train",
             cache_dir=args.cache_dir,
         )
         # See more about loading custom images at
@@ -405,7 +401,7 @@ def main():
 
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
-    column_names = dataset["train"].column_names
+    column_names = dataset.column_names
 
     # 6. Get the column names for input/target.
     dataset_columns = dataset_name_mapping.get(args.dataset_name, None)
@@ -463,9 +459,9 @@ def main():
 
     with accelerator.main_process_first():
         if args.max_train_samples is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+            dataset = dataset.shuffle(seed=args.seed).select(range(args.max_train_samples))
         # Set the training transforms
-        train_dataset = dataset["train"].with_transform(preprocess_train)
+        train_dataset = dataset.with_transform(preprocess_train)
 
     def collate_fn(examples):
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
@@ -496,8 +492,8 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    text_encoder, unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        text_encoder, unet, optimizer, train_dataloader, lr_scheduler
+    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader, lr_scheduler
     )
 
     weight_dtype = torch.float32
@@ -509,12 +505,11 @@ def main():
     # Move text_encode and vae to gpu.
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
-    text_encoder.to(accelerator.device) #, dtype=weight_dtype
+    text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
 
-    # Create EMA for the text encoder / unet.
+    # Create EMA for the unet.
     if args.use_ema:
-        ema_text_encoder = EMAModel(text_encoder.parameters())
         ema_unet = EMAModel(unet.parameters())
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -546,10 +541,10 @@ def main():
     global_step = 0
 
     for epoch in range(args.num_train_epochs):
-        model_components.train()
+        unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(model_components):
+            with accelerator.accumulate(unet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
                 latents = latents * 0.18215
@@ -579,7 +574,7 @@ def main():
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model_components.parameters(), args.max_grad_norm)
+                    accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -587,7 +582,6 @@ def main():
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 if args.use_ema:
-                    ema_text_encoder.step(text_encoder.parameters())
                     ema_unet.step(unet.parameters())
                 progress_bar.update(1)
                 global_step += 1
@@ -603,10 +597,8 @@ def main():
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        text_encoder = accelerator.unwrap_model(text_encoder)
         unet = accelerator.unwrap_model(unet)
         if args.use_ema:
-            ema_text_encoder.copy_to(text_encoder.parameters())
             ema_unet.copy_to(unet.parameters())
 
         pipeline = StableDiffusionPipeline(
@@ -615,7 +607,7 @@ def main():
             unet=unet,
             tokenizer=tokenizer,
             scheduler=PNDMScheduler.from_config("CompVis/stable-diffusion-v1-4", subfolder="scheduler"),
-            safety_checker=lambda clip_input, images: (images, [False for _ in images]), # Disable since it's a useless PITA
+            safety_checker=StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker"),
             feature_extractor=CLIPFeatureExtractor.from_pretrained("openai/clip-vit-base-patch32"),
         )
         pipeline.save_pretrained(args.output_dir)
