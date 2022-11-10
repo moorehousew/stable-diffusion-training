@@ -16,7 +16,7 @@ accelerate launch train_text_to_image.py \
   --resolution=512 \
   --center_crop \
   --random_flip \
-  --train_batch_size=1 \
+  --train_batch_size=8 \
   --gradient_accumulation_steps=4 \
   --gradient_checkpointing \
   --num_train_epochs=10 \
