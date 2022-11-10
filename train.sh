@@ -1,7 +1,7 @@
 #!bin/sh
 
 export MODEL_NAME="./sd-finetuned-model"
-export DATASET_NAME="./dataset"
+export TRAIN_DATA_DIR="./dataset/img"
 
 # HACK: Passing any arguments to this script resumes training from the existing model.
 if (( $# != 1))
@@ -11,7 +11,7 @@ fi
 
 accelerate launch train_text_to_image.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
-  --dataset_name=$DATASET_NAME \
+  --train_data_dir=$TRAIN_DATA_DIR \
   --use_ema \
   --resolution=512 \
   --center_crop \
